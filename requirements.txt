@@ -1,8 +1,8 @@
-requests
-beautifulsoup4
-PyYAML
-sentence-transformers
+openai
+langchain
 faiss-cpu
-transformers
-torch
+PyPDF2
+python-docx
+pandas
 numpy
+python-dotenv
