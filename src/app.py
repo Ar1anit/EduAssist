@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 from openai import OpenAI
+import openai
 import faiss
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ def load_api_key():
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY ist nicht gesetzt. Bitte füge ihn zur .env-Datei hinzu.")
     OpenAI.api_key = openai_api_key
+    openai.api_key = openai_api_key  # Füge dies hinzu, um openai direkt zu verwenden
 
 def trim_conversation_history(conversation_history, max_tokens=1500):
     # Kürzt die Konversationshistorie, um das Token-Limit einzuhalten
@@ -64,21 +66,22 @@ def answer_question(question, df, index, conversation_history):
     # Kürze die Konversationshistorie, wenn nötig
     conversation_history_trimmed = trim_conversation_history(conversation_history)
 
-    # Generiere die Antwort mit der ChatCompletion API
-    completion = client.chat.completions.create(
+    # Generiere die Antwort mit der ChatCompletion API mit Streaming
+    response = client.chat.completions.create(
         model='gpt-3.5-turbo',
         messages=conversation_history_trimmed,
         max_tokens=150,
         temperature=0,
         n=1,
-        stop=None
+        stop=None,
+        stream=True  # Streaming aktivieren
     )
 
-    # Hole die Antwort und füge sie zur Konversationshistorie hinzu
-    answer = completion.choices[0].message.content
-    conversation_history.append({'role': 'assistant', 'content': answer})
+    # Initialisiere eine leere Antwort
+    answer = ''
 
-    return answer
+    # Gib den Stream zurück
+    return response
 
 def main():
     # Lade den API-Schlüssel
@@ -115,11 +118,25 @@ def main():
         # Zeige die Nachricht des Benutzers sofort an
         with st.chat_message("user"):
             st.write(user_input)
-        # Generiere die Antwort
-        answer = answer_question(user_input, df, index, st.session_state.conversation_history)
-        # Zeige die Antwort des Bots an
-        with st.chat_message("assistant"):
-            st.write(answer)
+        # Platzhalter für die Antwort des Bots
+        bot_message_placeholder = st.chat_message("assistant")
+        with bot_message_placeholder:
+            # Platzhalter für den gestreamten Text
+            streamed_answer = st.empty()
+            full_response = ''
+            # Generiere die Antwort
+            response = answer_question(user_input, df, index, st.session_state.conversation_history)
+            try:
+                for chunk in response:
+                    chunk_message = chunk['choices'][0]['delta']
+                    if 'content' in chunk_message:
+                        content = chunk_message['content']
+                        full_response += content
+                        streamed_answer.markdown(full_response)
+                # Füge die vollständige Antwort zur Konversationshistorie hinzu
+                st.session_state.conversation_history.append({'role': 'assistant', 'content': full_response})
+            except Exception as e:
+                st.error(f"Ein Fehler ist aufgetreten: {e}")
 
 if __name__ == '__main__':
     main()
