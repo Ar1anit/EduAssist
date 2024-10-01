@@ -5,6 +5,8 @@ import faiss
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_random_exponential
+import time
 
 client = OpenAI()
 
@@ -29,58 +31,67 @@ def trim_conversation_history(conversation_history, max_tokens=1500):
         trimmed_history.insert(0, message)
     return trimmed_history
 
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(5))
 def answer_question(question, df, index, conversation_history):
-    # Erstelle Embedding für die Frage
-    response = client.embeddings.create(
-        input=question,
-        model='text-embedding-ada-002'
-    )
-    question_embedding = np.array(response.data[0].embedding).astype('float32')
+    try:
+        # Erstelle Embedding für die Frage
+        response = client.embeddings.create(
+            input=question,
+            model='text-embedding-ada-002'
+        )
+        question_embedding = np.array(response.data[0].embedding).astype('float32')
 
-    # Suche im FAISS-Index
-    k = 5  # Anzahl der Ergebnisse
-    distances, indices = index.search(np.array([question_embedding]), k)
+        # Suche im FAISS-Index
+        k = 5  # Anzahl der Ergebnisse
+        distances, indices = index.search(np.array([question_embedding]), k)
 
-    # Hole die entsprechenden Dokumente
-    contexts = df.iloc[indices[0]]['content'].tolist()
+        # Hole die entsprechenden Dokumente
+        contexts = df.iloc[indices[0]]['content'].tolist()
 
-    # Beschränke die Länge jedes Kontextes
-    max_context_length = 1500  # Maximale Anzahl an Zeichen pro Kontext
-    truncated_contexts = []
-    for context in contexts:
-        if len(context) > max_context_length:
-            context = context[:max_context_length] + '...'
-        truncated_contexts.append(context)
+        # Beschränke die Länge jedes Kontextes
+        max_context_length = 1500  # Maximale Anzahl an Zeichen pro Kontext
+        truncated_contexts = []
+        for context in contexts:
+            if len(context) > max_context_length:
+                context = context[:max_context_length] + '...'
+            truncated_contexts.append(context)
 
-    # Erstelle den Prompt
-    prompt = f"Beantworte die folgende Frage basierend auf den bereitgestellten Informationen.\n\n"
-    for i, context in enumerate(truncated_contexts):
-        prompt += f"Information {i+1}:\n{context}\n\n"
-    prompt += f"Frage:\n{question}\nAntwort:"
+        # Erstelle den Prompt
+        prompt = f"Beantworte die folgende Frage basierend auf den bereitgestellten Informationen.\n\n"
+        for i, context in enumerate(truncated_contexts):
+            prompt += f"Information {i+1}:\n{context}\n\n"
+        prompt += f"Frage:\n{question}\nAntwort:"
 
-    # Füge die aktuelle Benutzerfrage zur Konversationshistorie hinzu
-    conversation_history.append({'role': 'user', 'content': prompt})
+        # Füge die aktuelle Benutzerfrage zur Konversationshistorie hinzu
+        conversation_history.append({'role': 'user', 'content': prompt})
 
-    # Kürze die Konversationshistorie, wenn nötig
-    conversation_history_trimmed = trim_conversation_history(conversation_history)
+        # Kürze die Konversationshistorie, wenn nötig
+        conversation_history_trimmed = trim_conversation_history(conversation_history)
 
-    # Generiere die Antwort mit der ChatCompletion API (gestreamt)
-    stream = client.chat.completions.create(
-        model='gpt-3.5-turbo',
-        messages=conversation_history_trimmed,
-        max_tokens=150,
-        temperature=0,
-        n=1,
-        stop=None,
-        stream=True
-    )
+        # Generiere die Antwort mit der ChatCompletion API (gestreamt)
+        stream = client.chat.completions.create(
+            model='gpt-3.5-turbo',
+            messages=conversation_history_trimmed,
+            max_tokens=150,
+            temperature=0,
+            n=1,
+            stop=None,
+            stream=True
+        )
 
-    # Verarbeite den Stream und gib die Antwort stückweise zurück
-    for chunk in stream:
-        if chunk.choices[0].delta.content is not None:
-            yield chunk.choices[0].delta.content
+        # Verarbeite den Stream und gib die Antwort stückweise zurück
+        for chunk in stream:
+            if chunk.choices[0].delta.content is not None:
+                yield chunk.choices[0].delta.content
 
-    # Hinweis: Die Konversationshistorie wird nun außerhalb dieser Funktion aktualisiert
+    except client.APIError as e:
+        yield f"OpenAI API error: {str(e)}"
+    except client.APIConnectionError as e:
+        yield f"Failed to connect to OpenAI API: {str(e)}"
+    except client.RateLimitError as e:
+        yield f"OpenAI API request exceeded rate limit: {str(e)}"
+    except Exception as e:
+        yield f"An unexpected error occurred: {str(e)}"
 
 def main():
     # Lade den API-Schlüssel
@@ -127,9 +138,12 @@ def main():
                 message_placeholder.markdown(full_response + "▌")
             message_placeholder.markdown(full_response)
         
-        # Aktualisiere die Konversationshistorie
-        st.session_state.conversation_history.append({'role': 'user', 'content': user_input})
-        st.session_state.conversation_history.append({'role': 'assistant', 'content': full_response})
+        # Aktualisiere die Konversationshistorie nur, wenn keine Fehlermeldung zurückgegeben wurde
+        if not any(error_message in full_response for error_message in ["API error", "Failed to connect", "rate limit", "unexpected error"]):
+            st.session_state.conversation_history.append({'role': 'user', 'content': user_input})
+            st.session_state.conversation_history.append({'role': 'assistant', 'content': full_response})
+        else:
+            st.error("Ein Fehler ist aufgetreten. Bitte versuchen Sie es erneut.")
 
 if __name__ == '__main__':
     main()
