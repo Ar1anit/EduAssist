@@ -16,7 +16,7 @@ def load_api_key():
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY ist nicht gesetzt. Bitte füge ihn zur .env-Datei hinzu.")
     OpenAI.api_key = openai_api_key
-    openai.api_key = openai_api_key  # Füge dies hinzu, um openai direkt zu verwenden
+      # Füge dies hinzu, um openai direkt zu verwenden
 
 def trim_conversation_history(conversation_history, max_tokens=1500):
     # Kürzt die Konversationshistorie, um das Token-Limit einzuhalten
