@@ -7,6 +7,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 import time
+from sklearn.metrics.pairwise import cosine_similarity
 
 client = OpenAI()
 
@@ -31,6 +32,16 @@ def trim_conversation_history(conversation_history, max_tokens=1500):
         trimmed_history.insert(0, message)
     return trimmed_history
 
+def semantic_search(query_embedding, document_embeddings, top_k=5):
+    # Berechne Cosinus-Ähnlichkeit zwischen Query und allen Dokumenten
+    similarities = cosine_similarity(query_embedding.reshape(1, -1), document_embeddings)[0]
+    
+    # Sortiere die Indizes basierend auf der Ähnlichkeit (absteigend)
+    top_indices = similarities.argsort()[::-1][:top_k]
+    
+    # Gebe die Top-K Indizes und ihre Ähnlichkeitswerte zurück
+    return [(idx, similarities[idx]) for idx in top_indices]
+
 @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(5))
 def answer_question(question, df, index, conversation_history):
     try:
@@ -42,11 +53,13 @@ def answer_question(question, df, index, conversation_history):
         question_embedding = np.array(response.data[0].embedding).astype('float32')
 
         # Suche im FAISS-Index
-        k = 5  # Anzahl der Ergebnisse
+        k = 10  # Anzahl der Ergebnisse
         distances, indices = index.search(np.array([question_embedding]), k)
 
-        # Hole die entsprechenden Dokumente
-        contexts = df.iloc[indices[0]]['content'].tolist()
+        # Wähle nur Dokumente aus, die über einem Ähnlichkeitsschwellenwert liegen
+        threshold = 0.7  # Anpassen nach Bedarf
+        relevant_indices = [i for i, d in zip(indices[0], distances[0]) if d < threshold]
+        contexts = df.iloc[relevant_indices]['content'].tolist()
 
         # Beschränke die Länge jedes Kontextes
         max_context_length = 1500  # Maximale Anzahl an Zeichen pro Kontext
@@ -57,7 +70,17 @@ def answer_question(question, df, index, conversation_history):
             truncated_contexts.append(context)
 
         # Erstelle den Prompt
-        prompt = f"Beantworte die folgende Frage basierend auf den bereitgestellten Informationen.\n\n"
+        prompt = f"""
+            Basierend auf den folgenden Informationen, beantworte die Frage so präzise und hilfreich wie möglich. 
+            Wenn die Informationen nicht ausreichen, sage ehrlich, dass du die Frage nicht beantworten kannst.
+            Beziehe dich in deiner Antwort auf die relevantesten Teile der bereitgestellten Informationen.
+
+            Informationen:
+            {' '.join(truncated_contexts)}
+
+            Frage: {question}
+            Antwort:
+        """
         for i, context in enumerate(truncated_contexts):
             prompt += f"Information {i+1}:\n{context}\n\n"
         prompt += f"Frage:\n{question}\nAntwort:"
@@ -73,7 +96,8 @@ def answer_question(question, df, index, conversation_history):
             model='gpt-3.5-turbo',
             messages=conversation_history_trimmed,
             max_tokens=150,
-            temperature=0,
+            temperature=0.3,
+            top_p=0.9,
             n=1,
             stop=None,
             stream=True
@@ -92,6 +116,16 @@ def answer_question(question, df, index, conversation_history):
         yield f"OpenAI API request exceeded rate limit: {str(e)}"
     except Exception as e:
         yield f"An unexpected error occurred: {str(e)}"
+
+def suggest_followup_questions(answer):
+    prompt = f"Basierend auf dieser Antwort, schlage 3 relevante Followup-Fragen vor:\n\n{answer}\n\nFollowup-Fragen:"
+    response = client.chat.completions.create(
+        model='gpt-3.5-turbo',
+        messages=[{'role': 'user', 'content': prompt}],
+        max_tokens=100,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.split('\n')
 
 def main():
     # Lade den API-Schlüssel
@@ -137,6 +171,11 @@ def main():
                 full_response += response_chunk
                 message_placeholder.markdown(full_response + "▌")
             message_placeholder.markdown(full_response)
+
+        followup_questions = suggest_followup_questions(full_response)
+        st.write("Mögliche Followup-Fragen:")
+        for question in followup_questions:
+            st.write(question)
         
         # Aktualisiere die Konversationshistorie nur, wenn keine Fehlermeldung zurückgegeben wurde
         if not any(error_message in full_response for error_message in ["API error", "Failed to connect", "rate limit", "unexpected error"]):
