@@ -1,7 +1,6 @@
 import os
 import streamlit as st
 from openai import OpenAI
-import openai
 import faiss
 import numpy as np
 import pandas as pd
@@ -15,7 +14,7 @@ def load_api_key():
     openai_api_key = os.getenv('OPENAI_API_KEY')
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY ist nicht gesetzt. Bitte füge ihn zur .env-Datei hinzu.")
-    client.api_key = openai_api_key
+    OpenAI.api_key = openai_api_key
 
 def trim_conversation_history(conversation_history, max_tokens=1500):
     # Kürzt die Konversationshistorie, um das Token-Limit einzuhalten
@@ -65,22 +64,23 @@ def answer_question(question, df, index, conversation_history):
     # Kürze die Konversationshistorie, wenn nötig
     conversation_history_trimmed = trim_conversation_history(conversation_history)
 
-    # Generiere die Antwort mit der ChatCompletion API mit Streaming
-    response = client.chat.completions.create(
+    # Generiere die Antwort mit der ChatCompletion API (gestreamt)
+    stream = client.chat.completions.create(
         model='gpt-3.5-turbo',
         messages=conversation_history_trimmed,
         max_tokens=150,
         temperature=0,
         n=1,
         stop=None,
-        stream=True  # Streaming aktivieren
+        stream=True
     )
 
-    # Initialisiere eine leere Antwort
-    answer = ''
+    # Verarbeite den Stream und gib die Antwort stückweise zurück
+    for chunk in stream:
+        if chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0].delta.content
 
-    # Gib den Stream zurück
-    return response
+    # Hinweis: Die Konversationshistorie wird nun außerhalb dieser Funktion aktualisiert
 
 def main():
     # Lade den API-Schlüssel
@@ -117,25 +117,19 @@ def main():
         # Zeige die Nachricht des Benutzers sofort an
         with st.chat_message("user"):
             st.write(user_input)
-        # Platzhalter für die Antwort des Bots
-        bot_message_placeholder = st.chat_message("assistant")
-        with bot_message_placeholder:
-            # Platzhalter für den gestreamten Text
-            streamed_answer = st.empty()
-            full_response = ''
-            # Generiere die Antwort
-            response = answer_question(user_input, df, index, st.session_state.conversation_history)
-            try:
-                for chunk in response:
-                    chunk_message = chunk['choices'][0]['delta']
-                    if 'content' in chunk_message:
-                        content = chunk_message['content']
-                        full_response += content
-                        streamed_answer.markdown(full_response)
-                # Füge die vollständige Antwort zur Konversationshistorie hinzu
-                st.session_state.conversation_history.append({'role': 'assistant', 'content': full_response})
-            except Exception as e:
-                st.error(f"Ein Fehler ist aufgetreten: {e}")
+        
+        # Generiere und zeige die Antwort des Bots an
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            for response_chunk in answer_question(user_input, df, index, st.session_state.conversation_history):
+                full_response += response_chunk
+                message_placeholder.markdown(full_response + "▌")
+            message_placeholder.markdown(full_response)
+        
+        # Aktualisiere die Konversationshistorie
+        st.session_state.conversation_history.append({'role': 'user', 'content': user_input})
+        st.session_state.conversation_history.append({'role': 'assistant', 'content': full_response})
 
 if __name__ == '__main__':
     main()
